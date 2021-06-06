@@ -1,0 +1,19 @@
+CPP-CHECK results:  cppcheck --enable=all --std=c++11 -I include/ --suppress=missingIncludeSystem $( find . -name *.cpp | grep -vE -e "^./build/" -e "^./vendor/" -e "^./src/")
+
+
+Checking scripts/main.cpp...
+1/2 files checked 38% done
+Checking scripts/walker.cpp...
+2/2 files checked 100% done
+
+CPP-LINT results: cpplint $( find . -name \*.hpp -or -name \*.cpp | grep -vE -e "^./build/" -e "^./vendor/" -e "^./docs/" -e "^./results" )
+
+
+
+./src/walker/include/walker.hpp:34:  #ifndef header guard has wrong style, please use: TURTLEBOT_WALKER_SRC_WALKER_INCLUDE_WALKER_HPP_  [build/header_guard] [5]
+Done processing ./src/walker/include/walker.hpp
+./src/walker/scripts/main.cpp:31:  Found C system header after other header. Should be: main.h, c system, c++ system, other.  [build/include_order] [4]
+Done processing ./src/walker/scripts/main.cpp
+Done processing ./src/walker/scripts/walker.cpp
+Total errors found: 2
+

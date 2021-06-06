@@ -1,0 +1,8 @@
+prefix=/home/divyam/catkin_ws/install
+
+Name: divi
+Description: Description of divi
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

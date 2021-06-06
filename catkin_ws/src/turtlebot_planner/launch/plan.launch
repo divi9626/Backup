@@ -1,0 +1,29 @@
+<launch>
+    <!-- load world -->
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="world_name" value="$(find turtlebot_planner)/config/map.world" />
+    </include>
+
+    <!-- start our planner / open-loop controller node -->
+    <node
+        pkg="turtlebot_planner"
+        name="planner"
+        type="planner.py"
+        output="screen"
+    />
+
+<!--     <arg name="start_x" default=0 /> -->
+<!--     <arg name="start_y" default=0 /> -->
+
+
+    <!-- create a turtlebot, and move it to -->
+    <param name="robot_description" command="$(find xacro)/xacro --inorder $(find turtlebot3_description)/urdf/turtlebot3_burger.urdf.xacro" />
+    <node
+        pkg="gazebo_ros"
+        type="spawn_model"
+        name="spawn_urdf"
+        args="-urdf -model turtlebot3_burger -x 0 -y 0 -z 10 -Y 10 -param robot_description"
+    />
+
+
+</launch>

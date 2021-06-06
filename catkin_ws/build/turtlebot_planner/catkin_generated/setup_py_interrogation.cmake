@@ -1,0 +1,7 @@
+set(turtlebot_planner_SETUP_PY_SETUP_MODULE "distutils.core")
+set(turtlebot_planner_SETUP_PY_VERSION "0.0.0")
+set(turtlebot_planner_SETUP_PY_SCRIPTS "")
+set(turtlebot_planner_SETUP_PY_PACKAGES "turtlebot_planner")
+set(turtlebot_planner_SETUP_PY_PACKAGE_DIRS "src/turtlebot_planner")
+set(turtlebot_planner_SETUP_PY_MODULES "")
+set(turtlebot_planner_SETUP_PY_MODULE_DIRS "")

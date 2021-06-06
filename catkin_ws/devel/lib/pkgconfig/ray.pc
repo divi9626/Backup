@@ -1,0 +1,8 @@
+prefix=/home/divyam/catkin_ws/devel
+
+Name: ray
+Description: Description of ray
+Version: 1.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

@@ -1,0 +1,532 @@
+#!/usr/bin/env python
+
+import rospy
+import math
+import numpy as np
+import sys
+import tf
+import time
+from geometry_msgs.msg import Twist, Point
+from sensor_msgs.msg import LaserScan
+from tf.transformations import euler_from_quaternion
+import computation
+from queue import PriorityQueue
+import copy
+
+
+
+# Initialize your ROS node
+rospy.init_node("move_robot")
+# Set up a publisher to the /cmd_vel topic
+pub = rospy.Publisher("cmd_vel", Twist, queue_size=5)
+# Declare a message of type Twist
+velocity_msg = Twist()
+# publish the velocity at 4 Hz (4 times per second)
+rate = rospy.Rate(4)
+# set up a tf listener to retrieve transform between the robot and the world
+tf_listener = tf.TransformListener()
+# parent frame for the listener
+parent_frame = 'odom'
+# child frame for the listener
+child_frame = 'base_footprint'
+# gains for the proportional controllers. These values can be tuned.
+k_h_gain = 1
+k_v_gain = 0.8
+#  OG  k_v_gain = 0.8
+
+# rospack = rospkg.RosPack()
+
+try:
+    tf_listener.waitForTransform(parent_frame, child_frame, rospy.Time(), rospy.Duration(1.0))
+except (tf.Exception, tf.ConnectivityException, tf.LookupException):
+    rospy.loginfo("Cannot find transform between {p} and {c}".format(p=parent_frame, c=child_frame))
+    rospy.signal_shutdown("tf Exception")
+
+
+def rotate(relative_angle_degree, angular_velocity):
+    """Make the robot rotate in place
+
+    The angular velocity is modified before publishing the message on the topic /cmd_vel.
+    """
+
+    velocity_msg.angular.z = angular_velocity
+    reached = False
+    t0 = rospy.Time.now().to_sec()
+    while True:
+        # rospy.loginfo("TurtleBot is rotating")
+        pub.publish(velocity_msg)
+        # rate.sleep()
+        t1 = rospy.Time.now().to_sec()
+        # rospy.loginfo("t0: {t}".format(t=t0))
+        # rospy.loginfo("t1: {t}".format(t=t1))
+        current_angle_degree = (t1 - t0) * angular_velocity
+        # rospy.loginfo("current angle: {a}".format(a=current_angle_degree))
+        # rospy.loginfo("angle to reach: {a}".format(a=relative_angle_degree))
+        if abs(current_angle_degree) >= math.radians(abs(relative_angle_degree)):
+            rospy.loginfo("reached")
+            reached = True
+            break
+    # finally, stop the robot when the distance is moved
+    velocity_msg.angular.z = 0
+    pub.publish(velocity_msg)
+    return current_angle_degree, reached
+
+
+def get_odom_data():
+    """Get the current pose of the robot from the /odom topic
+
+    Return
+    ----------
+    The position (x, y# velocity_msg.angular.z = 1, z) and the yaw of the robot.
+    """
+    try:
+        (trans, rot) = tf_listener.lookupTransform(parent_frame, child_frame, rospy.Time(0))
+        # rotation is a list [r, p, y]
+        rotation = euler_from_quaternion(rot)
+    except (tf.Exception, tf.ConnectivityException, tf.LookupException):
+        rospy.loginfo("TF Exception")
+        return
+    # return the position (x, y, z) and the yaw
+    
+    return Point(*trans), rotation[2]
+
+
+# Modified get goal
+def get_goal(goall):
+    """Get goal arguments from the command line
+
+    Based on the user input between 1-5, the function will return a preset goal
+
+    Return
+    ----------
+    The goal (x, y) to reach.
+    """
+    goal_x = goall[0]
+    goal_y = goall[1]
+
+    return goal_x, goal_y
+
+
+def go_to_goal(last_rot,goall):
+    goall = goal_dict[goall]
+    """Task the robot to reach a goal (x,y) using a proportional controller.
+
+    The current pose of the robot is retrieved from /odom topic.
+    Publish the message to /cmd_vel topic.
+    """
+
+    # get current pose of the robot from the /odom topic
+    (pos, rot) = get_odom_data()
+    # get the goal to reach from arguments passed to the command line
+    g_x, g_y = goall[0], goall[1]
+    # compute the distance from the current position to the goal
+    if pos.x == g_x and pos.y == g_y:
+        rospy.logwarn("Goal reached---------------------")
+    print("-" * 50)
+    curr_x = pos.x
+    curr_y = pos.y
+    rospy.loginfo("x = {0}, y = {1}".format(curr_x, curr_y))
+    angle_to_goal = math.atan2(g_y - curr_y, g_x - curr_x)
+
+  
+    # if angle_to_goal < -math.pi / 4 or angle_to_goal > math.pi / 4:
+    #     if 0 > g_y > curr_y:
+    #         angle_to_goal = -2 * math.pi + angle_to_goal
+    #     elif 0 <= g_y < curr_y:
+    #         angle_to_goal = 2 * math.pi + angle_to_goal
+    # if last_rotation > math.pi - 0.1 and rot <= 0:
+    #     rot = (2 * math.pi) + rot
+    # elif last_rotation < -math.pi + 0.1 and rot > 0:
+    #     rot = (-2 * math.pi) + rot
+
+    # proportional control for rotating the robot
+    velocity_msg.angular.z = k_v_gain * (angle_to_goal - rot)
+    # print("Velocity angular", velocity_msg.angular.z)
+    distance_to_goal = computation.compute_distance(pos.x, pos.y, g_x, g_y)
+    # proportional control to move the robot forward
+    # We will drive the robot at a maximum speed of 0.5
+    velocity_msg.linear.x = min(k_h_gain * distance_to_goal, 0.2)
+
+    # set the z angular velocity for positive and negative rotations
+    if velocity_msg.angular.z > 0:
+        velocity_msg.angular.z = min(velocity_msg.angular.z, 2)
+    else:
+        velocity_msg.angular.z = max(velocity_msg.angular.z, -2)
+
+    # update the new rotation for the next loop
+    last_rot = rot
+    pub.publish(velocity_msg)
+    return velocity_msg, distance_to_goal, last_rot
+
+
+def exit_code():
+    """Function for exit flag used by the shutdown ros command"""
+    print("Shutting down ROS ")
+
+
+last_rotation = 0
+
+
+# noinspection SpellCheckingInspection
+def sensor_callback(msg):
+    start = time.clock()
+    global last_rotation
+    goal_next = goal_dict[goall]
+    # goal_next = goall
+    (pos, rot) = get_odom_data()
+    print(pos)
+    """Callback function to deal with messages on the /scan topic"""
+
+    test = msg.ranges[270:300]
+    avg_test = np.mean(test)
+    
+    front1 = msg.ranges[0:15]
+    front2 = msg.ranges[345:360] 
+    front = np.concatenate((front1,front2),axis=None)
+    print(front)
+
+    if np.median(front) <= 2.8 and np.median(front) >= 1.5:
+        detect[obstacle] = 1
+        print(detect)
+        # goal_dict[goal] = next_best
+        print("I see an obstacle ahead")
+        
+    elif np.median(front) <= 0.2:
+        rospy.logwarn("Front Obstacle detected")
+        rospy.logwarn("I am stuck, turning around")
+        velocity_msg.linear.x = -0.4
+        rotate(75, -1)
+        velocity_msg.linear.x = 1
+
+    else:
+        # msg.ranges[0] >= 0.5 or avg_front >= 0.5:
+        velocity_msg.angular.z = 0
+        velocity_msg.linear.x = 0.1
+        velocity, dist2goal, last_rotation = go_to_goal(last_rotation,goal_next)
+        # When goal is within threshold end the code
+        # NOTE: FIX B/C SOMETIMES DOESN'T EXECUTE BASED ON ROBOT FRONT DIRECTION
+        if dist2goal <= 0.1:
+            rospy.logwarn("Goal reached---------------------")
+            print("%%%%%%%%%%%%%%%%%%%%%",goal_next,next_best)
+            velocity_msg.linear.x = 0.0
+            velocity_msg.angular.z = 0.0
+        # if right has obstacle turn left
+        # if avg_test <= 0.25 or msg.ranges[310] <= 0.25 or msg.ranges[320] <= 0.25:
+        #     if msg.ranges[90] <= 0.25:
+        #         rospy.logwarn("Left has NO space to turn")
+        #     else:
+        #         rospy.logwarn("Right Obstacle detected")
+        #         # rospy.logwarn("Turn left")
+        #         go_to_goal(last_rotation,goal_next)
+        #         velocity_msg.linear.x = 0.0
+        #         velocity_msg.angular.z = 5
+        # # if left has obstacle turn right
+        # if msg.ranges[15] <= 0.25 or msg.ranges[45] <= 0.25:
+        #     if msg.ranges[270] <= 0.25:
+        #         rospy.logwarn("Right has NO space to turn")
+        #     else:
+        #         rospy.logwarn("Left Obstacle detected")
+        #         # rospy.logwarn("Turn right")
+        #         go_to_goal(last_rotation,goal_next)
+        #         velocity_msg.linear.x = 0.0
+        #         velocity_msg.angular.z = -5
+    
+    pub.publish(velocity_msg)
+    end = time.clock()
+    # print("the time is ......",end-start)
+    
+
+
+def read_scan():
+    """Set up a subscriber for the scan topic"""
+    rospy.Subscriber("scan", LaserScan, sensor_callback)
+    # rospy.spin()
+
+# roslaunch turtlebot3_gazebo turtlebot3_world.launch x_pos:=-2 y_pos:=0
+# RVIZ roslaunch turtlebot3_gazebo turtlebot3_gazebo_rviz.launch
+# Run the following is this file is called from the package bot_controller
+# rosrun rwa2_ngo_jackson my_bot_controller <1-5>
+
+
+
+
+
+
+##########################################################################################################################
+
+########## D* Lite #############
+
+## global variables 
+global map_cost
+map_cost = {}
+global map_key
+map_key = {}
+global start
+global goal
+
+###############################################################################
+def obstacle(x,y):
+    if x > 4.25 and x < 5.75 and y > 5.25 and y < 6.75:
+        return True
+    if x > 0.25 and x < 1.75 and y > 4.25 and y < 5.75:
+        return True
+    if x > 7.25 and x < 8.75 and y > 2.5 and y < 3.5:
+        return True
+    if (x - 2)**2 + (y - 8)**2 <= (1*5):
+        return True
+    return False
+
+
+### key ----> [min(g,rhs) + h + k, min(g,rhs)]
+###############################################################################
+#------------------------------------------------------------------------------
+def initialize(map_cost,map_key,height,width,goal):  # takes in goal to initialise rhs(goal) = 0
+    global INF
+    INF = 201
+    for i in range(height):
+        for j in range(width):
+            map_cost[(i,j)] = [INF-1,INF-1,INF-1] ## g,rhs,h
+            map_key[(i,j)] = [INF-1,INF-1] ## key
+    map_cost[goal] = [INF-1,0,INF-1]
+    map_cost[start][1] = INF-2  ## new_INF = INF - 1 -----> start_rhs = new_INF - 1
+    #queue.append(key) ###  list/priority_queue
+    return map_cost, map_key
+###############################################################################
+#------------------------------------------------------------------------------
+def updatedge(obstacle_node,queue_key):
+    
+    node = obstacle_node
+    x,y = node[0],node[1]
+    ## make current node g value as infinity !!
+    #global obstacle_node
+    map_cost[obstacle_node][1] = INF
+    queue_key.put((map_key[node],node))
+    
+    movement = {'up': (0,1), 'down' : (0,-1), 'left': (-1,0), 'right' : (1,0), 'upright' : (1,1), 'downright' : (1,-1), 'upleft':(-1,1), 'downleft':(-1,-1) }
+    ############## update rhs value of neighbours ##################
+        
+    '''update rhs value of children (predecessors)'''
+    children = []
+    move = ['up','down','right','left','upright','downright','upleft','downleft']
+    for child in move:
+        a = movement[child][0] + x 
+        b = movement[child][1] + y
+        if obstacle(a,b):
+            continue
+        if a > 0 and a < 20 and b > 0 and b < 20:
+            map_cost[(a,b)][1] = INF
+            children.append((a,b))
+    ##############################################
+
+    ########### key into queue ###################
+    for child in children:
+        if map_cost[child][0] != map_cost[child][1]:            ## inconsistent (i.e g != rhs)
+            map_key[child] = calculateKey(map_cost[child][0],map_cost[child][1],map_cost[child][2],km)
+            queue_key.put((map_key[child],child))
+    return queue_key, node
+############################################################################
+#------------------------------------------------------------------------------
+############################################################################
+    
+def hueristic(start,current):
+    h = math.sqrt((start[0] - current[0])**2 + (start[1] - current[1])**2)
+    return h
+#############################################################################
+    
+def calculateKey(g,rhs,h,km):
+    key = [min(g,rhs) + h + km, min(g,rhs)]
+    return key
+############################################################################
+
+movement = {'up': (0,1), 'down' : (0,-1), 'left': (-1,0), 'right' : (1,0), 'upright' : (1,1), 'downright' : (1,-1), 'upleft':(-1,1), 'downleft':(-1,-1) }
+#------------------------------------------------------------------------------
+#################### compute shortest distance #############################
+def computeShortestPath(queue_key,start,map_cost,map_key,iteration,obstacle_node):  ## simple backward A*
+    
+    count = 0
+    visited = []
+    parent_map = {}               ## dictionary for backtracking
+    parent_map[goal] = None
+    
+    queue_key.put((map_key[goal],goal))
+    node = goal
+    movement = {'up': (0,1), 'down' : (0,-1), 'left': (-1,0), 'right' : (1,0), 'upright' : (1,1), 'downright' : (1,-1), 'upleft':(-1,1), 'downleft':(-1,-1) }
+    
+    while map_cost[start][0] != map_cost[start][1] or (map_key[node] < map_key[start] and map_cost[start][0] != INF and map_cost[start][1] != INF):
+        #print(count)
+        count += 1
+        ''' Update State '''
+        ##################################################################
+        node = queue_key.get()[1]                              # store coords tuple
+        if map_cost[node][0] > map_cost[node][1]:
+            map_cost[node][0] = map_cost[node][1]          ## g value = rhs value after dequeing
+
+        elif map_cost[node][0] < map_cost[node][1]:
+            map_cost[node][0] = INF                        ## g = infinity if g < rhs
+
+        else:
+            continue
+        ##################################################################
+        
+        visited.append(node)
+        x,y = node[0], node[1]
+
+        ############## actions ##################
+        '''update rhs value of children (predecessors)'''
+        children = []
+        move = ['up','down','right','left','upright','downright','upleft','downleft']
+        for child in move:
+            if child == 'up' or child == 'down' or child == 'left' or child == 'right':
+                cost = 1
+            if child == 'upright' or child == 'downright' or child == 'upleft' or child == 'downleft':
+                cost = 1.42
+            a = movement[child][0] + x 
+            b = movement[child][1] + y
+            if obstacle(a,b):
+                cost = INF   #### make final map_cost[(a,b)] as INF
+            if a > 0 and a < 20 and b > 0 and b < 20:
+                if child not in visited:
+                    if iteration == 1:         ## during the first search when larger costs can be ignored
+                        if map_cost[node][0] + cost < map_cost[(a,b)][1]:        ## comparison with previous cost
+                            map_cost[(a,b)][1] = min(map_cost[a+1,b][0],map_cost[a-1,b][0],map_cost[a,b+1][0],map_cost[a,b-1][0],map_cost[a+1,b+1][0],map_cost[a+1,b-1][0],map_cost[a-1,b+1][0],map_cost[a-1,b-1][0]) + cost
+                            map_cost[(a,b)][2] = hueristic(node,start)           ## start node is our goal here
+                            children.append((a,b))
+                            parent_map[(a,b)] = node
+                    
+                    else:                    ## repairing phase when rhs needs to updated regardless.
+                        if (a,b) != obstacle_node:
+                            if (a,b) == goal:
+                                map_cost[(a,b)][0], map_cost[(a,b)][1] = 0, 0
+                                map_cost[(a,b)][1] = min(map_cost[a+1,b][0],map_cost[a-1,b][0],map_cost[a,b+1][0],map_cost[a,b-1][0],map_cost[a+1,b+1][0],map_cost[a+1,b-1][0],map_cost[a-1,b+1][0],map_cost[a-1,b-1][0]) + cost
+                                map_cost[(a,b)][2] = hueristic(node,start)           ## start node is our goal here
+                                children.append((a,b))
+        ##############################################
+        
+        ########### key into queue ###################
+        for child in children:
+            if child not in visited:
+                # if map_cost[child][0] != map_cost[child][1]:            ## inconsistent (i.e g != rhs)  --> wrong method
+                map_key[child] = calculateKey(map_cost[child][0],map_cost[child][1],map_cost[child][2],km)
+                queue_key.put((map_key[child],child))
+        ########### if the node is still inconsistent ############
+        map_key[node] = calculateKey(map_cost[node][0],map_cost[node][1],map_cost[node][2],km)
+        if map_cost[node][0] != map_cost[node][1]:
+            if node != goal:
+                queue_key.put((map_key[node],node))
+        ########## Don't exit if the start g nd rhs are INF
+        if map_cost[start][0] == map_cost[start][1] and map_cost[start][1] == INF:  
+            map_cost[start][1] == INF - 1
+                        ## to not exit when start g == rhs but they are INF
+    map_cost[goal][0], map_cost[goal][1] = 0,0
+    print(len(visited))
+    #print(node)
+    #print(map_key)
+    
+    return map_cost,visited,parent_map
+#------------------------------------------------------------------------------
+
+######### backtracking ###############
+def backtrack(parent_map):
+    parent = parent_map[start]
+    backtrack = [] 
+    while parent is not None:
+        backtrack.append(parent)
+        parent = parent_map[parent]
+    return backtrack
+######################################
+#------------------------------------------------------------------------------
+####### next best start node #########
+def next_best(start):
+    x, y = start[0], start[1]   ## current start x,y
+    min_cost = 100000
+    movement={'up':(0,1),'down':(0,-1),'left':(-1,0),'right': (1,0),'upright':(1,1),'downright':(1,-1),'upleft':(-1,1),'downleft':(-1,-1)}
+    actions = ['up','down','right','left','upright','downright','upleft','downleft'] ## action dictionary call
+    for move in actions:
+        node = (x + movement[move][0], y + movement[move][1])
+        if node[0] < 0 or node[0] > 20 or node[1] < 0 or node[1] > 20:                ## checking for illegal nodes
+            continue
+        cost = min(map_cost[node][0],map_cost[node][1])
+        #cost = map_key[node]
+        #print(cost,node,map_cost[node])
+        if cost < min_cost:   
+            min_cost = cost                                                       ## replacing  min cost
+            new_start = node                                                      ## Updating the start node if cost is less
+    return new_start
+
+#------------------------------------------------------------------------------
+####################### initialise #############################################
+
+height, width = 21, 21
+start, goal = (1,1), (5,8)
+
+map_cost, map_key = initialize(map_cost,map_key,height,width,goal)
+
+km = 0
+iteration = 1
+h = hueristic(start,goal)
+map_key[goal] = calculateKey(map_cost[goal][0],map_cost[goal][1],h,km)
+queue_key = PriorityQueue()
+obs_start = (0,0)
+map_cost, visited, parent_map = computeShortestPath(queue_key,start,map_cost,map_key,iteration,obs_start)
+
+path = backtrack(parent_map)
+print(path)
+
+
+###########################################################################################################################
+
+
+
+
+print("Start location is (-2, 0).")
+# argv is argument values that go into rosrun, in this case just 1 instead of 4
+# check length just 1 instead of 4, then call
+print("Enter goal location, choose between 0-5, 0 being the start")
+global goall
+(position, rotation) = get_odom_data()
+start = (0,0)
+goall, current = start, start
+goal_dict = {}
+goal_dict[goall] = start
+detect = {}
+detect[obstacle] = 0
+read_scan()
+
+
+# dynamic_obstacle = [(13,14),(6,8),(10,12),(12,10),(13,9),(17,14),(15,13),(8,8),(8,9)]
+r = rospy.Rate(50)
+while (current != goal):
+    iteration = 1
+    new_start = next_best(current)
+    print("the new start is ...........",new_start)          ## update start_state
+    km = km + hueristic(new_start, current)
+    current = copy.deepcopy(new_start)
+    goall = current
+    goal_dict[goall] = current
+    goal_x, goal_y = get_goal(current)
+    
+    count = 0
+    detect[obstacle] = 0
+    next_node = next_best(current)
+    distance_to_goal = computation.compute_distance(position.x, position.y, goal_x, goal_y)
+    while distance_to_goal >= 0.15:
+        (position, rotation) = get_odom_data()
+        
+        if detect[obstacle] == 1:
+            if count == 0:
+                iteration = 2    
+                queue_key,next_node = updatedge(next_node,queue_key)
+                computeShortestPath(queue_key,start,map_cost,map_key,2,next_node)
+            count += 1
+        print(new_start)
+        print(detect)
+        r.sleep()
+        if math.sqrt((position.x - current[0])**2 + (position.y - current[1])**2) <= 0.15:
+            print("distance to goal is .......",distance_to_goal)
+            rospy.logwarn("AT GOAL BREAKING LOOP")
+            break
+
+velocity_msg.linear.x = 0
+velocity_msg.angular.z = 0
+pub.publish(velocity_msg)
+
